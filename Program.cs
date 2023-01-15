@@ -1,147 +1,115 @@
 ﻿using System.CommandLine;
-using System.Net.Http.Json;
+using System.CommandLine.Invocation;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using CliWrap;
 using Vbox7DL;
-using Xabe.FFmpeg;
-using YoutubeDLSharp;
+
+var ffmpegCheck = await Cli.Wrap("ffmpeg")
+    .WithArguments("-version")
+    .WithValidation(CommandResultValidation.ZeroExitCode)
+    .ExecuteAsync();
+if (ffmpegCheck.ExitCode is not 0)
+{
+    Console.WriteLine("FFMpeg not found");
+    return;
+}
 
 HttpClient client = new();
 
-YoutubeDL youtubeDl = new()
+Option<string[]> urlsOption = new(new[] {"-i", "--input"}, "A URL link or Video ID to a Vbox7 video")
 {
-    YoutubeDLPath = "yt-dlp",
-    FFmpegPath = "ffmpeg",
-    OutputFileTemplate = "%(id)s.%(ext)s",
-    OverwriteFiles = false,
-    IgnoreDownloadErrors = false
-};
-
-var separatorChar = Path.DirectorySeparatorChar;
-
-Option<string> inputOption = new(new[] {"-i", "--input"}, "A URL link or Video ID to a Vbox7 video")
-{
-    AllowMultipleArgumentsPerToken = false,
-    IsRequired = true,
-    Arity = default
+    AllowMultipleArgumentsPerToken = true,
+    IsRequired = true
 };
 
 Option<string> outputOption = new(new [] { "-o", "--output" }, "The output file to write to")
 {
-    AllowMultipleArgumentsPerToken = false,
-    IsRequired = false,
-    Arity = default,
+    IsRequired = false
 };
 outputOption.SetDefaultValue(Directory.GetCurrentDirectory());
 
 RootCommand rootCommand = new("VBOX7 Downloader");
-foreach (var option in new[] { inputOption, outputOption })
-{
+foreach (var option in new Option[] { urlsOption, outputOption })
     rootCommand.AddOption(option);
+
+rootCommand.SetHandler(VideoHandler);
+
+async Task VideoHandler(InvocationContext invocationContext)
+{
+    var urls = invocationContext.ParseResult.GetValueForOption(urlsOption)!;
+    var outputPath = invocationContext.ParseResult.GetValueForOption(outputOption)!;
+
+    foreach (var url in urls)
+    {
+        var match = new Regex(@"play:(?<id>\w+)")
+            .Match(url);
+        await DownloadVideo(match, outputPath);
+    }
 }
 
-rootCommand.SetHandler(VideoHandler, inputOption, outputOption);
-
-async Task VideoHandler(string inputValue, string outputValue)
+async Task DownloadVideo(Match match, string outputPath)
 {
-    if (string.IsNullOrEmpty(youtubeDl.FFmpegPath))
-    {
-        Console.WriteLine("FFmpeg is not in the path\nYou can download ffmpeg from https://ffmpeg.org/download.html");
-        return;
-    }
+    var response = await client.GetAsync($"https://www.vbox7.com/aj/player/video/options?vid={match.Groups["id"].Value}");
+    var jsonResult = JsonSerializer.Deserialize<Vbox7Json.Root>(await response.Content.ReadAsStringAsync())!;
 
-    if (string.IsNullOrEmpty(youtubeDl.YoutubeDLPath))
-    {
-        Console.WriteLine("yt-dlp is not in the path\nYou can download yt-dlp from https://github.com/yt-dlp/yt-dlp");
-        return;
-    }
-
-    if (!inputValue.Contains("https://") && Regex.IsMatch(inputValue, @"^[a-z0-9]{10}$"))
-    {
-        inputValue = $"https://www.vbox7.com/play:{inputValue}";
-    }
-    
-    var videoId = new Regex(@"play:(?<id>\w+)").Match(inputValue);
-    await DownloadVideo(client, videoId, outputValue);
-}
-
-async Task DownloadVideo(HttpClient httpClient, Match match, string outputValue) 
-{
-    youtubeDl.OutputFolder = outputValue;
-    var response =
-        await httpClient.GetFromJsonAsync<Vbox7Json.Root>(
-            $"https://www.vbox7.com/aj/player/video/options?vid={match.Groups["id"].Value}");
-
-    if (!response!.Success)
+    if (!response.IsSuccessStatusCode)
     {
         Console.WriteLine("Invalid URL or ID");
         throw new Exception("Invalid URL or ID");
     }
-    var src = response.Options.Src;
-    var resolution = response.Options.HighestRes;
+
+    var src = jsonResult.Options.Src;
+    var resolution = jsonResult.Options.HighestRes;
 
     // If the video has been downloaded before it will be deleted
-    if (File.Exists($"{outputValue}{separatorChar}{response.Options.Title}.mp4"))
+    if (Path.Combine(outputPath, $"{jsonResult.Options.Title}.mp4") is { } path)
     {
-        File.Delete($"{outputValue}{separatorChar}{response.Options.Title}.mp4");
+        if (File.Exists(path))
+            File.Delete(path);
     }
 
     var videoUrl = src.Replace(".mpd", $"_{resolution}_track1_dash.mp4");
+    var videoUrl2 = src.Replace(".mpd", $"_{resolution}_track1_dashinit.mp4");
     var audioUrl = src.Replace(".mpd", $"_{resolution}_track2_dashinit.mp4");
 
-    var videoProgress = new Progress<DownloadProgress>(p =>
+    var videoFile = Path.Combine(outputPath, $"{match.Groups["id"].Value}_{resolution}_track1_dash.mp4");
+    var audioFile = Path.Combine(outputPath, $"{match.Groups["id"].Value}_{resolution}_track2_dashinit.mp4");
+    var outputFile = Path.Combine(outputPath, $"{jsonResult.Options.Title}.mp4");
+
+    // download video file
+    var videoUrlCheck = await client.GetAsync(videoUrl);
+
+    if (videoUrlCheck.IsSuccessStatusCode)
     {
-        if (p.Progress == 0) return;
-        Console.Write($"\rVideo Progress: {p.Progress:P}");
-    });
-    try
-    {
-        await youtubeDl.RunVideoDownload(videoUrl, progress: videoProgress);
+        await using var videoStream = await client.GetStreamAsync(videoUrl);
+        await using var videoFileStream = File.Create(videoFile);
+        await videoStream.CopyToAsync(videoFileStream);
     }
-    catch (Exception)
+    else
     {
-        Console.WriteLine("Could not download video");
-        throw;
+        await using var videoStream = await client.GetStreamAsync(videoUrl2);
+        await using var videoFileStream = File.Create(videoFile);
+        await videoStream.CopyToAsync(videoFileStream);
     }
 
-    Console.WriteLine();
+    // download audio file
+    await using var audioStream = await client.GetStreamAsync(audioUrl);
+    await using var audioFileStream = File.Create(audioFile);
+    await audioStream.CopyToAsync(audioFileStream);
 
-    var audioProgress = new Progress<DownloadProgress>(p =>
-    {
-        if (p.Progress == 0) return;
-        Console.Write($"\rAudio Progress: {p.Progress:P}");
-    });
-    try
-    {
-        await youtubeDl.RunVideoDownload(audioUrl, progress: audioProgress);
-    }
-    catch (Exception)
-    {
-        Console.WriteLine("Could not download audio");
-        throw;
-    }
-    Console.WriteLine();
-    
-    var videoFile = new FileInfo($"{outputValue}{separatorChar}{match.Groups["id"].Value}_{resolution}_track1_dash.mp4");
-    var audioFile = new FileInfo($"{outputValue}{separatorChar}{match.Groups["id"].Value}_{resolution}_track2_dashinit.mp4");
-    var outputFile = new FileInfo($"{outputValue}{separatorChar}{response.Options.Title}.mp4");
+    Cli.Wrap("ffmpeg").WithArguments(args => args
+        .Add("-i")
+        .Add(videoFile)
+        .Add("-c copy -map 0:v:0 -map 1:a:0")
+        .Add(outputFile))
+        .WithValidation(CommandResultValidation.ZeroExitCode)
+        .ExecuteAsync();
 
-    var parameter = $"-i {videoFile} -i {audioFile} -c copy -map 0:v:0 -map 1:a:0 \"{outputFile}\"";
-    var conversion = FFmpeg.Conversions.New()
-        .AddParameter(parameter);
-    try
-    {
-        await conversion.Start();
-    }
-    catch (Exception)
-    {
-        Console.WriteLine("Something went wrong...");
-        throw;
-    }
+    Console.WriteLine($"\"{jsonResult.Options.Title}\" has been downloaded to {outputPath}");
 
-    Console.WriteLine($"Video has finished downloading!\n{response.Options.Title} has been downloaded to {outputValue}");
-
-    File.Delete(videoFile.ToString());
-    File.Delete(audioFile.ToString());
+    File.Delete(videoFile);
+    File.Delete(audioFile);
 }
 
 await rootCommand.InvokeAsync(args);

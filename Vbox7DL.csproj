@@ -2,15 +2,18 @@
 
     <PropertyGroup>
         <OutputType>Exe</OutputType>
-        <TargetFramework>net6.0</TargetFramework>
+        <TargetFramework>net7.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <Version>2.0.0</Version>
+        <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>
+        <PackageProjectUrl>https://github.com/DontEatOreo/Vbox7DL</PackageProjectUrl>
+        <PackageTags>vbox7 cli agpl3 csharp-code downloader video-downloader dotnet dotnet-core</PackageTags>
     </PropertyGroup>
 
     <ItemGroup>
+      <PackageReference Include="CliWrap" Version="3.6.0" />
       <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
-      <PackageReference Include="Xabe.FFmpeg" Version="5.2.0" />
-      <PackageReference Include="YoutubeDLSharp" Version="0.4.2" />
     </ItemGroup>
 
 </Project>
